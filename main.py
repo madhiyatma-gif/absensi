@@ -1,65 +1,97 @@
-from flask import Flask, request, render_template_string
-from models import Base
-from database import engine
-from services.absen_service import absen
-from services.operator_service import update_operator
-from reports.laporan import laporan_bulanan
+from flask import Flask, request, render_template, Response
+import io
+from models import Base, Peserta, RiwayatAbsen
+from database import engine, session
+from datetime import date
 
 app = Flask(__name__)
-
-# Inisialisasi database
 Base.metadata.create_all(engine)
 
-@app.route("/")
-def home():
+# ------------------ MENU UTAMA ------------------
+@app.route("/peserta")
+def home_peserta():
     return """
-    <h2>Sistem Absensi</h2>
+    <h2>Menu Peserta</h2>
     <ul>
       <li><a href='/form_absen'>Form Absen</a></li>
-      <li><a href='/form_update'>Update ID & Password</a></li>
-      <li><a href='/form_laporan'>Laporan Bulanan</a></li>
+      <li><a href='/lihat_akun'>Lihat Akun</a></li>
     </ul>
     """
 
-@app.route("/form_absen")
-def form_absen():
+@app.route("/operator")
+def home_operator():
     return """
-    <h3>Form Absensi</h3>
-    <form method="post" action="/absen">
-      Nama: <input type="text" name="nama"><br>
-      No HP: <input type="text" name="no_hp"><br>
-      Keterangan: <input type="text" name="keterangan"><br>
-      <input type="submit" value="Absen">
-    </form>
+    <h2>Menu Operator</h2>
+    <ul>
+      <li><a href='/bulk_update'>Bulk Update ID & Password</a></li>
+      <li><a href='/download_template'>Download Template CSV</a></li>
+      <li><a href='/form_laporan'>Laporan Bulanan</a></li>
+      <li><a href='/daftar_peserta'>Daftar Peserta Lengkap</a></li>
+    </ul>
     """
 
-@app.route("/absen", methods=["POST"])
-def absen_route():
-    nama = request.form["nama"]
-    no_hp = request.form["no_hp"]
-    keterangan = request.form["keterangan"]
-    absen(nama, no_hp, keterangan)
-    return "<p>Absensi berhasil!</p><a href='/'>Kembali</a>"
+# ------------------ PESERTA ------------------
+@app.route("/form_absen", methods=["GET", "POST"])
+def absen():
+    if request.method == "POST":
+        nama = request.form["nama"]
+        no_hp = request.form["no_hp"]
+        keterangan = request.form["keterangan"]
 
-@app.route("/form_update")
-def form_update():
-    return """
-    <h3>Update ID & Password</h3>
-    <form method="post" action="/update">
-      Nomor urut peserta: <input type="number" name="no"><br>
-      ID baru: <input type="text" name="id"><br>
-      Password baru: <input type="text" name="password"><br>
-      <input type="submit" value="Update">
-    </form>
-    """
+        peserta = session.query(Peserta).filter_by(nama=nama, no_hp=no_hp).first()
+        if peserta:
+            riwayat = RiwayatAbsen(peserta_id=peserta.no, tanggal=date.today(), keterangan=keterangan)
+            session.add(riwayat)
+            session.commit()
+            return f"{peserta.nama} sudah absen."
+        else:
+            peserta_baru = Peserta(nama=nama, no_hp=no_hp)
+            session.add(peserta_baru)
+            session.commit()
+            return "Peserta baru ditambahkan."
+    return render_template("form_absen.html")
 
-@app.route("/update", methods=["POST"])
-def update_route():
-    no = int(request.form["no"])
-    id_baru = request.form["id"]
-    password_baru = request.form["password"]
-    update_operator(no, id_baru, password_baru)
-    return "<p>ID & Password berhasil diupdate!</p><a href='/'>Kembali</a>"
+@app.route("/lihat_akun", methods=["GET", "POST"])
+def lihat_akun():
+    if request.method == "POST":
+        nama = request.form["nama"]
+        no_hp = request.form["no_hp"]
+
+        peserta = session.query(Peserta).filter_by(nama=nama, no_hp=no_hp).first()
+        if peserta:
+            return f"ID: {peserta.id}, Password: {peserta.password}"
+        else:
+            return "Peserta tidak ditemukan."
+    return render_template("form_lihat_akun.html")
+
+# ------------------ OPERATOR ------------------
+@app.route("/bulk_update", methods=["GET", "POST"])
+def bulk_update():
+    if request.method == "POST":
+        data = request.form["bulk_data"]
+        lines = data.strip().split("\n")
+        for line in lines:
+            parts = line.split(",")
+            if len(parts) == 3:
+                no, id_baru, password_baru = parts
+                peserta = session.query(Peserta).filter_by(no=int(no)).first()
+                if peserta:
+                    peserta.id = id_baru.strip()
+                    peserta.password = password_baru.strip()
+        session.commit()
+        return "Update massal berhasil."
+    return render_template("form_bulk_update.html")
+
+@app.route("/download_template")
+def download_template():
+    output = io.StringIO()
+    output.write("no,id,password\n")
+    output.write("1,ID001,pass123\n")
+    output.write("2,ID002,pass456\n")
+    output.write("3,ID003,pass789\n")
+    return Response(output.getvalue(),
+                    mimetype="text/csv",
+                    headers={"Content-Disposition":"attachment;filename=template.csv"})
 
 @app.route("/form_laporan")
 def form_laporan():
@@ -76,8 +108,25 @@ def form_laporan():
 def laporan_route():
     bulan = int(request.args.get("bulan"))
     tahun = int(request.args.get("tahun"))
-    hasil = laporan_bulanan(bulan, tahun)
-    return render_template_string("<h3>Laporan Bulanan</h3><pre>{{hasil}}</pre>", hasil=hasil)
+    return f"Laporan bulan {bulan} tahun {tahun} (data akan ditampilkan di sini)."
 
+@app.route("/daftar_peserta")
+def daftar_peserta():
+    peserta_list = session.query(Peserta).all()
+    html = "<h2>Daftar Peserta & Riwayat Absen</h2><table border='1'>"
+    html += "<tr><th>No</th><th>Nama</th><th>No HP</th><th>ID</th><th>Password</th><th>Riwayat Absen</th></tr>"
+    for p in peserta_list:
+        # Ambil semua riwayat absen peserta ini
+        riwayat_list = session.query(RiwayatAbsen).filter_by(peserta_id=p.no).all()
+        riwayat_str = "<ul>"
+        for r in riwayat_list:
+            riwayat_str += f"<li>{r.tanggal} - {r.keterangan}</li>"
+        riwayat_str += "</ul>"
+
+        html += f"<tr><td>{p.no}</td><td>{p.nama}</td><td>{p.no_hp}</td><td>{p.id}</td><td>{p.password}</td><td>{riwayat_str}</td></tr>"
+    html += "</table>"
+    return html
+
+# ------------------ RUN ------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5005, debug=True)
